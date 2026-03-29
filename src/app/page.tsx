@@ -68,7 +68,7 @@ export default function Dashboard() {
       return
     }
 
-    router.push(`/packet/${loanApp.id}`)
+    router.push(`/packet/${loanApp.id}/intake`)
   }
 
   const handleLogout = async () => {

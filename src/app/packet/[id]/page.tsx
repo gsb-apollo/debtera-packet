@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react'
 import { createClient } from '@/lib/supabase'
+import SmartUpload from '@/components/SmartUpload'
+import PacketReviewer from '@/components/PacketReviewer'
 import { useRouter, useParams } from 'next/navigation'
 
 // @ts-nocheck
@@ -180,6 +182,21 @@ const DebtStep = ({ data, setData }: any) => {
   const totalBalance = data.reduce((s: number, d: any) => s + (parseFloat(d.presentBalance) || 0), 0);
   const totalPayment = data.reduce((s: number, d: any) => s + (parseFloat(d.monthlyPayment) || 0), 0);
   return (<>
+  <SmartUpload onFieldsExtracted={(docType: any, fields: any) => {
+      if (docType === 'loan_agreement') {
+        setData([...data, {
+          lender: fields.lender || '',
+          originationDate: fields.originationDate || '',
+          loanAmount: fields.loanAmount?.toString() || '',
+          intRate: fields.interestRate?.toString() || '',
+          maturityDate: fields.maturityDate || '',
+          monthlyPayment: fields.monthlyPayment?.toString() || '',
+          presentBalance: fields.loanAmount?.toString() || '',
+          security: fields.collateral || '',
+          status: 'Current',
+        }]);
+      }
+    }} />
     <SectionCard title="Current Debt Schedule" subtitle="List every outstanding debt obligation of the business.">
       <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" as const }}>
         <div style={{ padding: "10px 16px", background: colors.accentLight, borderRadius: 8 }}><div style={{ fontSize: 11, color: colors.accent, fontWeight: 600, textTransform: "uppercase" as const }}>Total Balance</div><div style={{ fontSize: 20, fontWeight: 700, color: colors.accent }}>${totalBalance.toLocaleString()}</div></div>
@@ -351,6 +368,7 @@ const ReviewStep = ({ company, owners, debts, banks, loan, history, eligibility,
       <div style={{ marginBottom: 20 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 14, fontWeight: 600, color: colors.text }}>{pct}% Complete</span><span style={{ fontSize: 13, color: colors.textMuted }}>{overallFilled} / {overallTotal} fields</span></div><div style={{ height: 10, background: colors.warm, borderRadius: 5, overflow: "hidden" }}><div style={{ height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, ${colors.accent}, ${colors.accentMuted})`, borderRadius: 5, transition: "width 0.5s ease" }} /></div></div>
       {sections.map((sec, i) => (<div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 0", borderBottom: i < sections.length - 1 ? `1px solid ${colors.border}` : "none" }}><div style={{ display: "flex", alignItems: "center", gap: 10 }}><span style={{ fontSize: 18 }}>{sec.icon}</span><span style={{ fontSize: 14, fontWeight: 500, color: colors.text }}>{sec.label}</span></div><div style={{ padding: "4px 12px", borderRadius: 12, fontSize: 12, fontWeight: 600, background: sec.filled === sec.total ? colors.accentLight : colors.warm, color: sec.filled === sec.total ? colors.accent : colors.warmDark }}>{sec.filled === sec.total ? "Complete ✓" : `${sec.filled} / ${sec.total}`}</div></div>))}
     </SectionCard>
+    <PacketReviewer company={company} owners={owners} debts={debts} banks={banks} loan={loan} history={history} eligibility={eligibility} documents={documents} />
     <div style={{ textAlign: "center" as const, padding: "24px", background: colors.accentLight, borderRadius: 12, border: `1px dashed ${colors.accentMuted}` }}><div style={{ fontSize: 24, marginBottom: 8 }}>📦</div><div style={{ fontSize: 16, fontWeight: 700, color: colors.accent, marginBottom: 4 }}>Export Packet</div><div style={{ fontSize: 13, color: colors.accent }}>PDF generation coming in Phase 2. Your data is saved automatically.</div></div>
   </>);
 };
