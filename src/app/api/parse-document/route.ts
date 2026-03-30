@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
     // Try text extraction first
     let text = '';
     try {
-      const pdfParse = (await import('pdf-parse')).default;
+      const pdfParse = (await import('pdf-parse') as any).default;
       const pdfData = await pdfParse(buffer);
       text = pdfData.text || '';
     } catch {
