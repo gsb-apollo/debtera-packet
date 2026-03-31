@@ -3,6 +3,7 @@
 
 import { useState } from 'react'
 import { useRouter, useParams } from 'next/navigation'
+import { createClient } from '@/lib/supabase'
 
 const colors: any = {
   bg: "#FAF8F5", card: "#FFFFFF", accent: "#2D6A4F", accentLight: "#D8F3DC",
@@ -12,23 +13,31 @@ const colors: any = {
 
 const docTypeLabels: Record<string, string> = {
   loan_agreement: '📄 Loan Agreement',
+  debt_schedule: '📊 Debt Schedule',
   tax_return_personal: '🧾 Personal Tax Return',
   tax_return_business: '🏢 Business Tax Return',
   articles_of_incorporation: '📜 Articles of Incorporation',
   operating_agreement: '📋 Operating Agreement',
   lease_agreement: '🏠 Lease Agreement',
   financial_statement: '📊 Financial Statement',
+  bank_statement: '🏦 Bank Statement',
+  k1_schedule: '📑 Schedule K-1',
+  pfs_form: '🏠 Personal Financial Statement',
   unknown: '❓ Unknown Document',
 };
 
 const docTypeRouting: Record<string, string> = {
   loan_agreement: 'Populates your Debt Schedule',
-  tax_return_personal: 'Populates Personal Finances and Income',
-  tax_return_business: 'Populates Company Info and Financials',
-  articles_of_incorporation: 'Populates Company Info and Ownership',
-  operating_agreement: 'Populates Company Info and Ownership',
-  lease_agreement: 'Populates Business History (lease details)',
-  financial_statement: 'Populates Bank Accounts and Financials',
+  debt_schedule: 'Populates your Debt Schedule with multiple entries',
+  tax_return_personal: 'Populates Ownership, Personal Finances, and Income',
+  tax_return_business: 'Populates Company Info (name, EIN, entity type, NAICS, address)',
+  articles_of_incorporation: 'Populates Company Info, Ownership, and Year Began',
+  operating_agreement: 'Populates Company Info, Ownership structure, and Management',
+  lease_agreement: 'Populates Business History with lease details',
+  financial_statement: 'Populates Company financials',
+  bank_statement: 'Populates Bank Accounts (name, type, balance)',
+  k1_schedule: 'Populates Ownership percentages and Partner income',
+  pfs_form: 'Populates Personal Financial Statement (assets, liabilities, income)',
   unknown: 'Will be stored for manual review',
 };
 
@@ -46,10 +55,56 @@ interface ParsedFile {
 export default function IntakePage() {
   const params = useParams();
   const router = useRouter();
+  const supabase = createClient();
   const loanAppId = params.id as string;
 
   const [files, setFiles] = useState<ParsedFile[]>([]);
   const [processing, setProcessing] = useState(false);
+
+  const parseOneFile = async (file: File, fileIndex: number) => {
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const response = await fetch('/api/parse-document', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      setFiles(prev => {
+        const updated = [...prev];
+        if (response.ok) {
+          updated[fileIndex] = {
+            ...updated[fileIndex],
+            status: 'parsed',
+            documentType: data.documentType,
+            confidence: data.confidence,
+            mode: data.mode,
+            extractedFields: data.extractedFields,
+          };
+        } else {
+          updated[fileIndex] = {
+            ...updated[fileIndex],
+            status: 'error',
+            error: data.error,
+          };
+        }
+        return updated;
+      });
+    } catch (err: any) {
+      setFiles(prev => {
+        const updated = [...prev];
+        updated[fileIndex] = {
+          ...updated[fileIndex],
+          status: 'error',
+          error: err.message || 'Upload failed',
+        };
+        return updated;
+      });
+    }
+  };
 
   const handleUpload = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return;
@@ -61,54 +116,17 @@ export default function IntakePage() {
       status: 'uploading' as const,
     }));
 
+    const startIndex = files.length;
     setFiles(prev => [...prev, ...newFiles]);
 
-    for (let i = 0; i < fileList.length; i++) {
-      const file = fileList[i];
-      const fileIndex = files.length + i;
-
-      try {
-        const formData = new FormData();
-        formData.append('file', file);
-
-        const response = await fetch('/api/parse-document', {
-          method: 'POST',
-          body: formData,
-        });
-
-        const data = await response.json();
-
-        setFiles(prev => {
-          const updated = [...prev];
-          if (response.ok) {
-            updated[fileIndex] = {
-              ...updated[fileIndex],
-              status: 'parsed',
-              documentType: data.documentType,
-              confidence: data.confidence,
-              mode: data.mode,
-              extractedFields: data.extractedFields,
-            };
-          } else {
-            updated[fileIndex] = {
-              ...updated[fileIndex],
-              status: 'error',
-              error: data.error,
-            };
-          }
-          return updated;
-        });
-      } catch (err: any) {
-        setFiles(prev => {
-          const updated = [...prev];
-          updated[fileIndex] = {
-            ...updated[fileIndex],
-            status: 'error',
-            error: err.message || 'Upload failed',
-          };
-          return updated;
-        });
-      }
+    // Process up to 3 files in parallel for speed
+    const fileArray = Array.from(fileList);
+    const CONCURRENCY = 3;
+    for (let i = 0; i < fileArray.length; i += CONCURRENCY) {
+      const batch = fileArray.slice(i, i + CONCURRENCY);
+      await Promise.all(
+        batch.map((file, batchIdx) => parseOneFile(file, startIndex + i + batchIdx))
+      );
     }
 
     setProcessing(false);
@@ -129,14 +147,24 @@ export default function IntakePage() {
   };
 
   const handleContinue = async () => {
-    // Store extracted data in Supabase via the packet builder
-    // For now, we store in sessionStorage and the wizard picks it up
     if (parsedFiles.length > 0) {
       const extractedData = parsedFiles.map(f => ({
         documentType: f.documentType,
         fields: f.extractedFields,
+        fileName: f.fileName,
+        confidence: f.confidence,
+        mode: f.mode,
       }));
+      // Write to sessionStorage for immediate same-session pickup
       sessionStorage.setItem(`intake-${loanAppId}`, JSON.stringify(extractedData));
+      // Also persist to Supabase so data survives tab closure
+      try {
+        await supabase.from('loan_applications').update({
+          parsed_documents: extractedData,
+        }).eq('id', loanAppId);
+      } catch (err) {
+        console.error('Failed to persist parsed documents to Supabase:', err);
+      }
     }
     router.push(`/packet/${loanAppId}`);
   };
@@ -177,7 +205,7 @@ export default function IntakePage() {
             Drop all your relevant documents here: loan agreements, tax returns, articles of incorporation, financial statements, leases. All in PDF format.
           </p>
           <p style={{ margin: '12px auto 0', fontSize: 14, color: colors.accent, fontWeight: 600 }}>
-            Debtera will read each document and pre-fill your application.
+            Debtera will read each document and pre-fill your packet.
           </p>
         </div>
 
@@ -312,11 +340,15 @@ export default function IntakePage() {
             </div>
             <div style={{ fontSize: 13, color: colors.accent, lineHeight: 1.8 }}>
               {parsedFiles.some(f => f.documentType === 'loan_agreement') && '✓ Debt Schedule entries from your loan agreements\n'}
-              {parsedFiles.some(f => f.documentType === 'tax_return_personal') && '✓ Personal income from your tax returns\n'}
-              {parsedFiles.some(f => f.documentType === 'tax_return_business') && '✓ Company financials from business tax returns\n'}
-              {parsedFiles.some(f => f.documentType === 'articles_of_incorporation' || f.documentType === 'operating_agreement') && '✓ Company info and ownership from org documents\n'}
+              {parsedFiles.some(f => f.documentType === 'debt_schedule') && '✓ Full debt schedule with multiple entries\n'}
+              {parsedFiles.some(f => f.documentType === 'tax_return_personal') && '✓ Owner info and personal income from tax returns\n'}
+              {parsedFiles.some(f => f.documentType === 'tax_return_business') && '✓ Company name, EIN, entity type, NAICS from business tax returns\n'}
+              {parsedFiles.some(f => f.documentType === 'articles_of_incorporation' || f.documentType === 'operating_agreement') && '✓ Company info, ownership structure, and year began from org documents\n'}
               {parsedFiles.some(f => f.documentType === 'lease_agreement') && '✓ Lease details for business history\n'}
               {parsedFiles.some(f => f.documentType === 'financial_statement') && '✓ Financial data from your statements\n'}
+              {parsedFiles.some(f => f.documentType === 'bank_statement') && '✓ Bank account details (name, type, balance)\n'}
+              {parsedFiles.some(f => f.documentType === 'k1_schedule') && '✓ Ownership percentages and partner income from K-1s\n'}
+              {parsedFiles.some(f => f.documentType === 'pfs_form') && '✓ Personal assets, liabilities, and income from PFS\n'}
             </div>
           </div>
         )}

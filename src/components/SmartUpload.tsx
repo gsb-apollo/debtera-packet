@@ -11,12 +11,16 @@ const colors: any = {
 
 const docTypeLabels: Record<string, string> = {
   loan_agreement: 'Loan Agreement',
+  debt_schedule: 'Debt Schedule',
   tax_return_personal: 'Personal Tax Return',
   tax_return_business: 'Business Tax Return',
   articles_of_incorporation: 'Articles of Incorporation',
   operating_agreement: 'Operating Agreement',
   lease_agreement: 'Lease Agreement',
   financial_statement: 'Financial Statement',
+  bank_statement: 'Bank Statement',
+  k1_schedule: 'Schedule K-1',
+  pfs_form: 'Personal Financial Statement',
   unknown: 'Unknown Document',
 };
 

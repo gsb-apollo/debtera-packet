@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { createClient } from '@/lib/supabase'
 import SmartUpload from '@/components/SmartUpload'
 import PacketReviewer from '@/components/PacketReviewer'
@@ -35,11 +35,11 @@ const documentCategories: any[] = [
   { id: "organizational", label: "Organizational Documents", description: "Articles of Incorporation, By-Laws, Partnership Agreement, LLC Operating Agreement.", required: true, accepts: ".pdf,.doc,.docx" },
   { id: "ar_ap", label: "Accounts Receivable & Payable Aging", description: "Current AR and AP aging schedules.", required: false, accepts: ".pdf,.doc,.docx,.xlsx,.xls,.csv" },
   { id: "environmental", label: "Environmental Questionnaire", description: "To be completed by owner of leased location or seller.", required: false, accepts: ".pdf,.doc,.docx" },
-  { id: "other", label: "Other Supporting Documents", description: "Any additional documents relevant to your application.", required: false, accepts: ".pdf,.doc,.docx,.xlsx,.xls,.csv,.jpg,.jpeg,.png" },
+  { id: "other", label: "Other Supporting Documents", description: "Any additional documents relevant to your packet.", required: false, accepts: ".pdf,.doc,.docx,.xlsx,.xls,.csv,.jpg,.jpeg,.png" },
 ];
 
 const initialCompany: any = { legalName: "", dba: "", tin: "", streetAddress: "", mailingAddress: "", phone: "", cellular: "", email: "", entityType: "", naicsCode: "", yearBegan: "", employeesFT: "", employeesPT: "" };
-const emptyOwner: any = { name: "", title: "", ownershipPct: "", dob: "", ssn: "", homeAddress: "", phone: "", email: "", spouseName: "", spouseSsn: "", spouseDob: "", spouseEmployer: "", education: [{ school: "", dates: "", major: "", degree: "" }], workHistory: [{ company: "", from: "", to: "", title: "", duties: "" }] };
+const emptyOwner: any = { name: "", title: "", ownershipPct: "", dob: "", homeAddress: "", phone: "", email: "", education: [{ school: "", dates: "", major: "", degree: "" }], workHistory: [{ company: "", from: "", to: "", title: "", duties: "" }] };
 const emptyDebt: any = { lender: "", originationDate: "", loanAmount: "", intRate: "", maturityDate: "", monthlyPayment: "", presentBalance: "", security: "", status: "Current" };
 const emptyBank: any = { bank: "", accountType: "", balance: "", nameOnAccount: "" };
 const emptyAffiliate: any = { name: "", title: "", ownershipPct: "", employees: "" };
@@ -184,17 +184,30 @@ const DebtStep = ({ data, setData }: any) => {
   return (<>
   <SmartUpload onFieldsExtracted={(docType: any, fields: any) => {
       if (docType === 'loan_agreement') {
-        setData([...data, {
-          lender: fields.lender || '',
-          originationDate: fields.originationDate || '',
-          loanAmount: fields.loanAmount?.toString() || '',
-          intRate: fields.interestRate?.toString() || '',
-          maturityDate: fields.maturityDate || '',
-          monthlyPayment: fields.monthlyPayment?.toString() || '',
-          presentBalance: fields.loanAmount?.toString() || '',
-          security: fields.collateral || '',
+        setData([...data.filter((d: any) => d.lender), {
+          lender: fields.lender || fields.lenderName || '',
+          originationDate: fields.originationDate || fields.origination_date || fields.effectiveDate || '',
+          loanAmount: String(fields.loanAmount || fields.loan_amount || fields.originalAmount || ''),
+          intRate: String(fields.interestRate || fields.interest_rate || fields.rate || ''),
+          maturityDate: fields.maturityDate || fields.maturity_date || '',
+          monthlyPayment: String(fields.monthlyPayment || fields.monthly_payment || ''),
+          presentBalance: String(fields.presentBalance || fields.currentBalance || ''),
+          security: fields.collateral || fields.security || '',
           status: 'Current',
         }]);
+      } else if (docType === 'debt_schedule' && fields.debts && Array.isArray(fields.debts)) {
+        const newDebts = fields.debts.map((d: any) => ({
+          lender: d.lender || d.lenderName || '',
+          originationDate: d.originationDate || d.origination_date || '',
+          loanAmount: String(d.loanAmount || d.loan_amount || ''),
+          intRate: String(d.interestRate || d.interest_rate || ''),
+          maturityDate: d.maturityDate || d.maturity_date || '',
+          monthlyPayment: String(d.monthlyPayment || d.monthly_payment || ''),
+          presentBalance: String(d.presentBalance || d.current_balance || ''),
+          security: d.collateral || d.security || '',
+          status: d.status || 'Current',
+        }));
+        setData([...data.filter((d: any) => d.lender), ...newDebts]);
       }
     }} />
     <SectionCard title="Current Debt Schedule" subtitle="List every outstanding debt obligation of the business.">
@@ -343,7 +356,9 @@ const DocumentsStep = ({ data, setData }: any) => {
   </>);
 };
 
-const ReviewStep = ({ company, owners, debts, banks, loan, history, eligibility, documents }: any) => {
+const ReviewStep = ({ company, owners, debts, banks, affiliates, loan, history, resumes, pfs, eligibility, documents }: any) => {
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState('');
   const fieldFilled = (v: any) => v !== "" && v !== undefined && v !== null;
   const countFilled = (obj: any, keys: string[]) => keys.filter(k => fieldFilled(obj[k])).length;
   const companyKeys = ["legalName", "tin", "streetAddress", "phone", "email", "entityType"];
@@ -363,13 +378,99 @@ const ReviewStep = ({ company, owners, debts, banks, loan, history, eligibility,
   const overallFilled = sections.reduce((s, sec) => s + sec.filled, 0);
   const overallTotal = sections.reduce((s, sec) => s + sec.total, 0);
   const pct = Math.round((overallFilled / overallTotal) * 100);
+
+  const handleExport = async () => {
+    setExporting(true);
+    setExportError('');
+    try {
+      const response = await fetch('/api/export-packet', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company, owners, debts, banks, affiliates, loan, history, resumes, pfs, eligibility }),
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Export failed');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${(company?.legalName || 'Financial-Packet').replace(/[^a-zA-Z0-9 ]/g, '')}-Packet.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      setExportError(err.message || 'Failed to export PDF');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   return (<>
     <SectionCard title="Packet Completion Summary" subtitle="Sections marked incomplete need attention before you submit to your lender.">
       <div style={{ marginBottom: 20 }}><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}><span style={{ fontSize: 14, fontWeight: 600, color: colors.text }}>{pct}% Complete</span><span style={{ fontSize: 13, color: colors.textMuted }}>{overallFilled} / {overallTotal} fields</span></div><div style={{ height: 10, background: colors.warm, borderRadius: 5, overflow: "hidden" }}><div style={{ height: "100%", width: `${pct}%`, background: `linear-gradient(90deg, ${colors.accent}, ${colors.accentMuted})`, borderRadius: 5, transition: "width 0.5s ease" }} /></div></div>
       {sections.map((sec, i) => (<div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 0", borderBottom: i < sections.length - 1 ? `1px solid ${colors.border}` : "none" }}><div style={{ display: "flex", alignItems: "center", gap: 10 }}><span style={{ fontSize: 18 }}>{sec.icon}</span><span style={{ fontSize: 14, fontWeight: 500, color: colors.text }}>{sec.label}</span></div><div style={{ padding: "4px 12px", borderRadius: 12, fontSize: 12, fontWeight: 600, background: sec.filled === sec.total ? colors.accentLight : colors.warm, color: sec.filled === sec.total ? colors.accent : colors.warmDark }}>{sec.filled === sec.total ? "Complete ✓" : `${sec.filled} / ${sec.total}`}</div></div>))}
     </SectionCard>
+    {pct < 100 && (
+      <SectionCard title="What to Upload Next" subtitle="These documents will auto-fill remaining sections. Click 'Upload Docs' in the header to add them.">
+        <div style={{ display: "flex", flexDirection: "column" as const, gap: 8 }}>
+          {!fieldFilled(company.legalName) && !fieldFilled(company.tin) && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>📄 Business Tax Return (1120S/1065)</span> fills Company Info: name, EIN, entity type, NAICS, address
+            </div>
+          )}
+          {owners.filter((o: any) => fieldFilled(o.name)).length === 0 && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>📜 Articles of Incorporation or Operating Agreement</span> fills Ownership: names, titles, percentages
+            </div>
+          )}
+          {debts.filter((d: any) => fieldFilled(d.lender)).length === 0 && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>📊 Debt Schedule or Loan Agreements</span> fills Debt Schedule: lenders, balances, rates, payments
+            </div>
+          )}
+          {banks.filter((b: any) => fieldFilled(b.bank)).length === 0 && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>🏦 Bank Statements</span> fills Bank Accounts: institution, type, balance
+            </div>
+          )}
+          {pfs.length === 0 && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>🧾 Personal Tax Returns or SBA Form 413</span> fills Personal Finances: income, assets, liabilities
+            </div>
+          )}
+          {history.filter((h: any) => fieldFilled(h)).length < 3 && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>✍️ Business History</span> requires manual input (10 narrative questions about your business)
+            </div>
+          )}
+          {eligibility.filter((e: any) => fieldFilled(e)).length < 5 && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>✅ Eligibility</span> requires manual input (13 yes/no compliance questions)
+            </div>
+          )}
+          {!fieldFilled(loan.amountRequested) && (
+            <div style={{ padding: "10px 14px", background: colors.bg, borderRadius: 8, fontSize: 13, color: colors.text }}>
+              <span style={{ fontWeight: 600 }}>💰 Loan Request</span> requires manual input (amount, purpose, use of proceeds)
+            </div>
+          )}
+        </div>
+      </SectionCard>
+    )}
     <PacketReviewer company={company} owners={owners} debts={debts} banks={banks} loan={loan} history={history} eligibility={eligibility} documents={documents} />
-    <div style={{ textAlign: "center" as const, padding: "24px", background: colors.accentLight, borderRadius: 12, border: `1px dashed ${colors.accentMuted}` }}><div style={{ fontSize: 24, marginBottom: 8 }}>📦</div><div style={{ fontSize: 16, fontWeight: 700, color: colors.accent, marginBottom: 4 }}>Export Packet</div><div style={{ fontSize: 13, color: colors.accent }}>PDF generation coming in Phase 2. Your data is saved automatically.</div></div>
+    <div style={{ textAlign: "center" as const, padding: "24px", background: colors.accentLight, borderRadius: 12, border: `1px dashed ${colors.accentMuted}` }}>
+      <div style={{ fontSize: 24, marginBottom: 8 }}>📦</div>
+      <div style={{ fontSize: 16, fontWeight: 700, color: colors.accent, marginBottom: 8 }}>Export Packet</div>
+      <p style={{ fontSize: 13, color: colors.accent, margin: '0 0 16px' }}>Download a formatted PDF with all your packet data, ready to send to your lender.</p>
+      {exportError && <p style={{ fontSize: 13, color: colors.danger, margin: '0 0 12px' }}>{exportError}</p>}
+      <button onClick={handleExport} disabled={exporting} style={{
+        padding: '12px 32px', background: colors.accent, color: '#fff', border: 'none',
+        borderRadius: 8, fontSize: 15, fontWeight: 700, cursor: exporting ? 'wait' : 'pointer',
+        opacity: exporting ? 0.7 : 1,
+      }}>{exporting ? 'Generating PDF...' : 'Download PDF'}</button>
+    </div>
   </>);
 };
 
@@ -417,9 +518,347 @@ export default function PacketPage() {
       if (loanApp.business_history?.length > 0) setHistory(loanApp.business_history)
       if (loanApp.eligibility_answers?.length > 0) setEligibility(loanApp.eligibility_answers)
       if (loanApp.documents) setDocuments(loanApp.documents)
+      // Restore all array data
+      if (loanApp.owners?.length > 0) setOwners(loanApp.owners)
+      if (loanApp.debts?.length > 0) setDebts(loanApp.debts)
+      if (loanApp.banks?.length > 0) setBanks(loanApp.banks)
+      if (loanApp.affiliates?.length > 0) setAffiliates(loanApp.affiliates)
+      if (loanApp.resumes?.length > 0) setResumes(loanApp.resumes)
+      if (loanApp.pfs?.length > 0) setPfs(loanApp.pfs)
     } catch (err) { console.error('Error loading:', err) }
     finally { setLoading(false) }
   }
+
+  // Apply intake data: check sessionStorage first, then Supabase parsed_documents
+  useEffect(() => {
+    if (loading) return;
+    const applyExtractedDocs = async () => {
+      let extracted: { documentType: string; fields: Record<string, any> }[] = [];
+
+      // Check sessionStorage first (same-session, fastest)
+      const raw = sessionStorage.getItem(`intake-${loanAppId}`);
+      if (raw) {
+        extracted = JSON.parse(raw);
+        sessionStorage.removeItem(`intake-${loanAppId}`);
+        console.log('[Intake] Found data in sessionStorage');
+      } else {
+        // Fall back to Supabase parsed_documents (survives tab closure)
+        console.log('[Intake] No sessionStorage, checking Supabase...');
+        const { data: loanApp } = await supabase.from('loan_applications')
+          .select('parsed_documents').eq('id', loanAppId).single();
+        if (loanApp && loanApp.parsed_documents?.length > 0) {
+          extracted = loanApp.parsed_documents;
+          // Clear after reading so it doesn't re-apply on next load
+          await supabase.from('loan_applications')
+            .update({ parsed_documents: [] }).eq('id', loanAppId);
+          console.log('[Intake] Found data in Supabase parsed_documents');
+        }
+      }
+
+      if (extracted.length === 0) {
+        console.log('[Intake] No extracted data found');
+        return;
+      }
+      console.log('[Intake] Applying extracted data:', JSON.stringify(extracted, null, 2));
+
+      for (const doc of extracted) {
+        const f = doc.fields || {};
+        const hasFields = Object.keys(f).length > 0 && Object.values(f).some(v => v !== null && v !== '');
+        console.log(`[Intake] Processing ${doc.documentType}, hasFields: ${hasFields}`, f);
+        if (!hasFields) continue;
+
+        switch (doc.documentType) {
+          case 'debt_schedule':
+            // Debt schedules return an array of debts
+            if (f.debts && Array.isArray(f.debts)) {
+              setDebts(prev => {
+                const filtered = prev.filter(d => d.lender);
+                const newDebts = f.debts.map((d: any) => ({
+                  lender: d.lender || d.lenderName || '',
+                  originationDate: d.originationDate || d.origination_date || '',
+                  loanAmount: String(d.loanAmount || d.loan_amount || d.originalAmount || ''),
+                  intRate: String(d.interestRate || d.interest_rate || ''),
+                  maturityDate: d.maturityDate || d.maturity_date || '',
+                  monthlyPayment: String(d.monthlyPayment || d.monthly_payment || ''),
+                  presentBalance: String(d.presentBalance || d.current_balance || ''),
+                  security: d.collateral || d.security || '',
+                  status: d.status || 'Current',
+                }));
+                console.log('[Intake] Adding debt schedule rows:', newDebts);
+                return [...filtered, ...newDebts];
+              });
+            }
+            break;
+
+          case 'loan_agreement':
+            setDebts(prev => {
+              const newDebt = {
+                lender: f.lender || f.lenderName || f.lending_institution || '',
+                originationDate: f.originationDate || f.origination_date || f.effectiveDate || '',
+                loanAmount: String(f.loanAmount || f.loan_amount || f.originalAmount || f.amount || ''),
+                intRate: String(f.interestRate || f.interest_rate || f.rate || ''),
+                maturityDate: f.maturityDate || f.maturity_date || f.expirationDate || '',
+                monthlyPayment: String(f.monthlyPayment || f.monthly_payment || f.payment || ''),
+                presentBalance: String(f.presentBalance || f.currentBalance || ''),
+                security: f.collateral || f.security || f.collateralDescription || '',
+                status: 'Current',
+              };
+              console.log('[Intake] Adding debt row:', newDebt);
+              // Replace empty default row, or append
+              const filtered = prev.filter(d => d.lender);
+              return [...filtered, newDebt];
+            });
+            break;
+
+          case 'tax_return_business':
+            setCompany((prev: any) => ({
+              ...prev,
+              legalName: prev.legalName || f.businessName || f.business_name || f.companyName || '',
+              tin: prev.tin || f.ein || f.EIN || f.taxId || f.tax_id || '',
+              entityType: prev.entityType || f.entityType || f.entity_type || f.formType || '',
+              naicsCode: prev.naicsCode || f.naicsCode || f.naics_code || f.NAICS || f.naics || '',
+              streetAddress: prev.streetAddress || f.address || f.businessAddress || '',
+            }));
+            console.log('[Intake] Tax return business fields applied:', {
+              businessName: f.businessName, ein: f.ein, entityType: f.entityType,
+              naicsCode: f.naicsCode, totalRevenue: f.totalRevenue,
+            });
+            break;
+
+          case 'tax_return_personal':
+            setOwners((prev: any) => {
+              if (prev.length > 0 && !prev[0].name && (f.taxpayerName || f.taxpayer_name)) {
+                const updated = [...prev];
+                updated[0] = {
+                  ...updated[0],
+                  name: f.taxpayerName || f.taxpayer_name || '',
+                  homeAddress: updated[0].homeAddress || f.address || f.homeAddress || '',
+                };
+                return updated;
+              }
+              return prev;
+            });
+            setPfs((prev: any) => {
+              const p = prev[0] || { ...emptyPFS };
+              return [{
+                ...p,
+                salary: p.salary || String(f.wagesAndSalary || f.wages || f.wages_and_salary || ''),
+                netInvestmentIncome: p.netInvestmentIncome || String(f.interestIncome || f.interest_income || f.dividendIncome || ''),
+                realEstateIncome: p.realEstateIncome || String(f.rentalIncome || f.rental_income || f.scheduleE || ''),
+                otherIncome: p.otherIncome || String(f.businessIncome || f.business_income || f.scheduleC || ''),
+              }, ...prev.slice(1)];
+            });
+            console.log('[Intake] Personal tax return fields applied:', {
+              taxpayerName: f.taxpayerName, wages: f.wagesAndSalary,
+              totalIncome: f.totalIncome, rentalIncome: f.rentalIncome,
+            });
+            break;
+
+          case 'articles_of_incorporation':
+          case 'operating_agreement': {
+            const formationDate = f.dateOfFormation || f.date_of_formation || f.effectiveDate || f.effective_date || '';
+            const formationYear = formationDate ? formationDate.substring(0, 4) : '';
+            setCompany((prev: any) => ({
+              ...prev,
+              legalName: prev.legalName || f.entityName || f.entity_name || f.companyName || f.company_name || '',
+              entityType: prev.entityType || f.entityType || f.entity_type || f.type || '',
+              yearBegan: prev.yearBegan || formationYear,
+              streetAddress: prev.streetAddress || f.address || f.principalAddress || f.principal_address || '',
+            }));
+            console.log('[Intake] Articles/OA fields applied:', {
+              entityName: f.entityName, entityType: f.entityType, formationDate,
+              stateOfFormation: f.stateOfFormation, members: f.members,
+            });
+            if (f.members && Array.isArray(f.members) && f.members.length > 0) {
+              setOwners((prev: any) => {
+                const hasData = prev.some((o: any) => o.name);
+                if (hasData) return prev;
+                return f.members.map((m: any) => ({
+                  ...emptyOwner,
+                  name: m.name || m.memberName || '',
+                  title: m.title || m.role || m.position || '',
+                  ownershipPct: String(m.ownershipPct || m.ownership_pct || m.percentage || m.interest || m.membershipInterest || ''),
+                }));
+              });
+            }
+            break;
+          }
+
+          case 'lease_agreement':
+            setHistory((prev: any) => {
+              const updated = [...prev];
+              const rent = f.monthlyRent || f.monthly_rent;
+              const expires = f.leaseEndDate || f.lease_end_date || f.expirationDate;
+              if (!updated[9] && expires) {
+                updated[9] = `Yes, leased. Lease expires ${expires}. Monthly rent: $${rent || 'N/A'}.`;
+              }
+              return updated;
+            });
+            break;
+
+          case 'financial_statement':
+            setCompany((prev: any) => ({
+              ...prev,
+              legalName: prev.legalName || f.companyName || f.company_name || '',
+            }));
+            // If it has cash data, add to banks
+            if (f.cashAndEquivalents || f.cashOnHand) {
+              setBanks((prev: any) => {
+                const balance = String(f.cashAndEquivalents || f.cashOnHand || '');
+                if (!balance) return prev;
+                const newBank = {
+                  ...emptyBank,
+                  bank: f.companyName || 'From Financial Statement',
+                  accountType: 'Checking',
+                  balance,
+                };
+                if (prev.length === 1 && !prev[0].bank) return [newBank];
+                return [...prev, newBank];
+              });
+            }
+            console.log('[Intake] Financial statement fields applied:', {
+              companyName: f.companyName, totalAssets: f.totalAssets, cashOnHand: f.cashAndEquivalents,
+            });
+            break;
+
+          case 'bank_statement':
+            setBanks((prev: any) => {
+              const newBank = {
+                bank: f.bankName || f.bank_name || f.institution || '',
+                accountType: f.accountType || f.account_type || 'Checking',
+                balance: String(f.endingBalance || f.ending_balance || f.currentBalance || f.averageDailyBalance || ''),
+                nameOnAccount: f.accountHolder || f.account_holder || f.accountName || '',
+              };
+              console.log('[Intake] Adding bank account:', newBank);
+              if (prev.length === 1 && !prev[0].bank) return [newBank];
+              return [...prev, newBank];
+            });
+            break;
+
+          case 'k1_schedule': {
+            // K-1 populates ownership and PFS income
+            const partnerName = f.partnerName || f.partner_name || f.shareholderName || '';
+            const ownerPct = String(f.ownershipPct || f.ownership_pct || f.profitSharingPct || '');
+            if (partnerName) {
+              setOwners((prev: any) => {
+                // Try to find existing owner by name and update, or add new
+                const idx = prev.findIndex((o: any) => o.name && o.name.toLowerCase() === partnerName.toLowerCase());
+                if (idx >= 0) {
+                  const updated = [...prev];
+                  updated[idx] = { ...updated[idx], ownershipPct: updated[idx].ownershipPct || ownerPct };
+                  return updated;
+                }
+                if (prev.length === 1 && !prev[0].name) {
+                  return [{ ...prev[0], name: partnerName, ownershipPct: ownerPct }];
+                }
+                return [...prev, { ...emptyOwner, name: partnerName, ownershipPct: ownerPct }];
+              });
+            }
+            // K-1 income goes to PFS
+            const k1Income = f.ordinaryIncome || f.guaranteedPayments;
+            if (k1Income) {
+              setPfs((prev: any) => {
+                const p = prev[0] || { ...emptyPFS };
+                return [{
+                  ...p,
+                  otherIncome: p.otherIncome || String(f.ordinaryIncome || ''),
+                  salary: p.salary || String(f.guaranteedPayments || ''),
+                }, ...prev.slice(1)];
+              });
+            }
+            // Also populate company info from the partnership
+            setCompany((prev: any) => ({
+              ...prev,
+              legalName: prev.legalName || f.partnershipName || f.partnership_name || '',
+              tin: prev.tin || f.partnershipEIN || f.partnership_ein || '',
+            }));
+            console.log('[Intake] K-1 fields applied:', {
+              partnerName, ownerPct, partnershipName: f.partnershipName, ordinaryIncome: f.ordinaryIncome,
+            });
+            break;
+          }
+
+          case 'pfs_form': {
+            // Direct mapping to Personal Financial Statement
+            const assets = f.assets || {};
+            const liabilities = f.liabilities || {};
+            const income = f.income || {};
+            const newPfs = {
+              cashOnHand: String(assets.cashOnHand || ''),
+              savings: String(assets.savings || ''),
+              ira: String(assets.retirementAccounts || assets.ira || ''),
+              accountsReceivable: String(assets.accountsReceivable || ''),
+              lifeInsurance: String(assets.lifeInsurance || ''),
+              stocksBonds: String(assets.stocksBonds || ''),
+              realEstate: String(assets.realEstate || ''),
+              automobiles: String(assets.automobiles || ''),
+              otherProperty: String(assets.otherProperty || ''),
+              otherAssets: String(assets.otherAssets || ''),
+              accountsPayable: String(liabilities.accountsPayable || ''),
+              notesPayable: String(liabilities.notesPayable || ''),
+              installmentAuto: String(liabilities.installmentAuto || ''),
+              installmentOther: String(liabilities.installmentOther || ''),
+              loanAgainstInsurance: String(liabilities.loanAgainstInsurance || ''),
+              mortgages: String(liabilities.mortgages || ''),
+              unpaidTaxes: String(liabilities.unpaidTaxes || ''),
+              otherLiabilities: String(liabilities.otherLiabilities || ''),
+              salary: String(income.salary || ''),
+              netInvestmentIncome: String(income.netInvestmentIncome || ''),
+              realEstateIncome: String(income.realEstateIncome || ''),
+              otherIncome: String(income.otherIncome || ''),
+            };
+            // Also try to get owner name/address
+            const pfsName = f.name || f.ownerName || '';
+            if (pfsName) {
+              setOwners((prev: any) => {
+                if (prev.length > 0 && !prev[0].name) {
+                  const updated = [...prev];
+                  updated[0] = { ...updated[0], name: pfsName, homeAddress: f.address || '' };
+                  return updated;
+                }
+                return prev;
+              });
+            }
+            setPfs((prev: any) => {
+              if (prev.length === 0) return [newPfs];
+              // Merge with existing, only fill empty fields
+              const existing = prev[0] || {};
+              const merged: any = { ...existing };
+              for (const key of Object.keys(newPfs)) {
+                if (!merged[key] && (newPfs as any)[key]) merged[key] = (newPfs as any)[key];
+              }
+              return [merged, ...prev.slice(1)];
+            });
+            console.log('[Intake] PFS form fields applied:', { name: pfsName, totalAssets: f.totalAssets, netWorth: f.netWorth });
+            break;
+          }
+
+          default:
+            console.log(`[Intake] Unhandled document type: ${doc.documentType}`);
+        }
+      }
+    };
+    applyExtractedDocs().catch(err => {
+      console.error('[Intake] Error applying intake data:', err);
+    });
+  }, [loading, loanAppId]);
+
+  // Auto-save: debounce 5 seconds after any data change
+  const autoSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isFirstRender = useRef(true);
+
+  useEffect(() => {
+    // Skip auto-save during initial load
+    if (loading || isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
+    if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current);
+    autoSaveTimer.current = setTimeout(() => {
+      saveAllDataRef.current();
+    }, 5000);
+    return () => { if (autoSaveTimer.current) clearTimeout(autoSaveTimer.current); };
+  }, [company, owners, debts, banks, affiliates, loan, history, resumes, pfs, eligibility, documents]);
 
   const saveAllData = async () => {
     if (!companyId) return; setSaving(true)
@@ -432,10 +871,15 @@ export default function PacketPage() {
         amount_requested: loan.amountRequested, key_purpose: loan.keyPurpose, project_description: loan.projectDescription, collateral_description: loan.collateralDescription,
         use_of_proceeds: { landBuilding: loan.landBuilding, newConstruction: loan.newConstruction, landAcquisition: loan.landAcquisition, machineryEquipment: loan.machineryEquipment, businessAcquisition: loan.businessAcquisition, furnitureFixtures: loan.furnitureFixtures, debtRefinance: loan.debtRefinance, inventory: loan.inventory, leaseholdImprovements: loan.leaseholdImprovements, closingCosts: loan.closingCosts, workingCapital: loan.workingCapital, other: loan.other },
         business_history: history, eligibility_answers: eligibility, documents: documents,
+        owners: owners, debts: debts, banks: banks, affiliates: affiliates, resumes: resumes, pfs: pfs,
       }).eq('id', loanAppId)
     } catch (err) { console.error('Error saving:', err) }
     finally { setSaving(false) }
   }
+
+  // Keep a stable ref to saveAllData for the auto-save timer
+  const saveAllDataRef = useRef(saveAllData);
+  useEffect(() => { saveAllDataRef.current = saveAllData; });
 
   const changeStep = (newStep: number) => { saveAllData(); setStep(newStep); }
 
@@ -469,7 +913,13 @@ export default function PacketPage() {
               <button onClick={() => { saveAllData(); router.push('/'); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 14, color: colors.textMuted }}>← Dashboard</button>
               <div><h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: colors.accent, fontFamily: "'DM Serif Display', serif" }}>debtera</h1><p style={{ margin: 0, fontSize: 12, color: colors.textMuted }}>Financial Packet Builder</p></div>
             </div>
-            <div style={{ fontSize: 13, color: colors.textMuted }}>{saving ? 'Saving...' : `Step ${step + 1} of ${STEPS.length}`}</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ fontSize: 13, color: colors.textMuted }}>{saving ? 'Saving...' : `Step ${step + 1} of ${STEPS.length}`}</div>
+              <button onClick={() => { saveAllData(); router.push(`/packet/${loanAppId}/intake`); }} style={{
+                padding: '5px 12px', background: colors.accentLight, border: `1px solid ${colors.accentMuted}`,
+                borderRadius: 6, fontSize: 12, fontWeight: 600, color: colors.accent, cursor: 'pointer',
+              }}>📄 Upload Docs</button>
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 2, overflow: 'hidden' }}>
             {STEPS.map((s, i) => (<button key={s.id} onClick={() => changeStep(i)} style={{ flex: 1, padding: '6px 2px', border: 'none', cursor: 'pointer', background: 'transparent' }} title={s.label}><div style={{ height: 4, borderRadius: 2, background: i <= step ? colors.accent : colors.warm, transition: 'background 0.3s' }} /><div style={{ fontSize: 9, marginTop: 4, color: i === step ? colors.accent : colors.textMuted, fontWeight: i === step ? 700 : 400, whiteSpace: 'nowrap' as const, overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.label}</div></button>))}
